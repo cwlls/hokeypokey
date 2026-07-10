@@ -63,7 +63,9 @@ GPG Client → HKP HTTP Server (Quart) → Orchestrator → Cache + Sources (LDA
 | `sources/github.py` | GitHub source; freshness via `ETag` |
 | `hkp/routes.py` | Quart blueprints for HKP endpoints |
 | `hkp/formatter.py` | ASCII-armored and machine-readable index formatting |
-| `config.py` | TOML loader with validation; duration string parsing (`"5m"`, `"1h30m"`) |
+| `ratelimit.py` | Per-client token-bucket rate limiter for `/pks/lookup` |
+| `_compat.py` | Import-time shims (pgpy/imghdr on Python 3.13+) |
+| `config.py` | TOML loader with validation; duration string parsing (`"5m"`, `"1h30m"`, `"7d"`) |
 | `search.py` | Parses HKP search terms into typed `SearchType` variants |
 | `models.py` | Core data classes: `SearchType`, `SourceKey`, `CachedKey`, etc. |
 

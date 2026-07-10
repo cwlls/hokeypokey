@@ -3,6 +3,10 @@
 # Copy this file to hokeypokey.toml and edit it for your environment.
 # All fields shown here are optional unless marked (required).
 
+# Maximum levels of cross-source resolver chaining per lookup (default: 2).
+# NOTE: top-level key — must stay above the first [section] header.
+# resolver_max_depth = 2
+
 # ---------------------------------------------------------------------------
 # [server] — HTTP/HTTPS server settings
 # ---------------------------------------------------------------------------
@@ -19,6 +23,31 @@ port = 11371
 # tls_cert = "/etc/ssl/certs/hokeypokey.crt"
 # tls_key  = "/etc/ssl/private/hokeypokey.key"
 
+# Write an HTTP access log to stdout (default: true).
+# access_log = true
+
+# ---------------------------------------------------------------------------
+# [rate_limit] — per-client rate limiting for /pks/lookup
+#
+# Every cache-miss lookup fans out to upstream sources (LDAP, GitHub API),
+# so unauthenticated clients could otherwise exhaust upstream rate limits.
+# ---------------------------------------------------------------------------
+
+[rate_limit]
+# Enable per-client rate limiting (default: true).
+enabled = true
+
+# Allowed lookups per client per window (default: 60).
+requests = 60
+
+# Window duration (default: "1m").
+window = "1m"
+
+# Trust the X-Forwarded-For header for the client identity (default: false).
+# Enable ONLY when hokeypokey sits behind a trusted reverse proxy (e.g. the
+# bundled Caddy) — otherwise clients can spoof the header to bypass limits.
+# trust_forwarded_for = true
+
 # ---------------------------------------------------------------------------
 # [cache] — Key cache settings
 # ---------------------------------------------------------------------------
@@ -33,10 +62,16 @@ backend = "memory"
 # Individual sources can override this with their own ttl setting.
 default_ttl = "10m"
 
-# Maximum number of keys to hold in the cache at once (optional).
+# Maximum number of keys to hold in the cache at once (default: 10000).
 # When the limit is reached, the least-recently-used key is evicted.
-# Omit or set to 0 to allow unlimited growth (suitable for small deployments).
+# Set to 0 to allow unlimited growth (only for small, trusted deployments —
+# an unbounded cache lets clients grow memory without limit).
 # max_size = 10000
+
+# How long past its TTL a cached key may still be served when its upstream
+# source is unreachable (default: "1h"). Bounds the "serve stale on error"
+# behaviour so a revoked key cannot be served indefinitely during an outage.
+# max_stale = "1h"
 
 # ---------------------------------------------------------------------------
 # [[sources]] — Key sources (one block per source)
@@ -94,6 +129,9 @@ search_filter = "(pgpKey=*)"
 # Use this if your LDAP server uses a certificate signed by an internal CA.
 # tls_ca_file = "/etc/ssl/certs/internal-ca.crt"
 
+# Connect/receive timeout for LDAP operations (default: "10s").
+# timeout = "10s"
+
 # Field mappings: logical field name → LDAP attribute name.
 # These define what fields are searchable and how they map to LDAP attributes.
 # Field names must be globally unique across all sources.
@@ -101,7 +139,7 @@ search_filter = "(pgpKey=*)"
 email       = "mail"           # Search by email address
 username    = "uid"            # Search by LDAP username
 employee_id = "employeeNumber" # Search by employee ID
-# github_id = "githubUsername" # Uncomment if your LDAP stores GitHub usernames
+github_id   = "githubUsername" # Custom attribute — feeds the resolver below
 
 # ---- GitHub Organisation ----
 [[sources]]
@@ -119,6 +157,10 @@ token_env = "GITHUB_TOKEN"
 # GitHub API base URL (default: "https://api.github.com").
 # Override for GitHub Enterprise Server installations.
 # api_base = "https://github.example.com/api/v3"
+
+# Maximum user-search matches to fetch keys for during an email search
+# (default: 5). Caps how many GitHub API calls one lookup can trigger.
+# max_email_results = 5
 
 # Field mappings for GitHub.
 # Supported GitHub field names: "login" (username), "email"

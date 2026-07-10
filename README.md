@@ -22,6 +22,7 @@ When the same fingerprint appears in multiple sources, the source with the lowes
 - **Flexible search** — keys are searchable by email, key ID, fingerprint, and custom indexed fields (configurable per source)
 - **Dotenv support** — automatically loads `.env` files for credentials; no need to `export` in your shell
 - **Read-only** — no key submission endpoint; keys are added only through upstream sources
+- **Built-in abuse protection** — per-client rate limiting on lookups, bounded cache with LRU eviction, and capped upstream fan-out protect your LDAP server and GitHub API quota
 - **CORS headers on all responses** — `Access-Control-Allow-Origin: *` for browser-based clients
 - **Deployable via `uv` or Docker** — modern Python packaging with Docker image and Compose support
 
@@ -38,9 +39,11 @@ On cache hit, hokeypokey validates freshness using lightweight, source-specific 
 | Source | Mechanism | How It Works |
 |--------|-----------|--------------|
 | LDAP | `modifyTimestamp` operational attribute | Query LDAP for only the `modifyTimestamp` of the entry. If unchanged since last fetch, serve from cache. If changed, refetch the full key. |
-| GitHub | HTTP `HEAD` request + `ETag`/`Last-Modified` | Send a `HEAD` (or conditional `GET` with `If-None-Match`) to the GitHub API endpoint. `304 Not Modified` = serve from cache. Otherwise refetch. |
+| GitHub | Conditional `GET` + `ETag` | Send a conditional `GET` with `If-None-Match` to the GitHub API endpoint. `304 Not Modified` = serve from cache. Otherwise refetch the user's keys. |
 
 Each cached entry stores the key data, the source it came from (and that source's priority), a source-specific freshness token, and a configurable TTL after which freshness must be re-validated.
+
+If an upstream source is unreachable during revalidation, the stale key is still served — but only up to the `max_stale` ceiling (default: 1 hour past the TTL). Beyond that the entry is dropped, so a revoked key cannot be served indefinitely during an outage.
 
 ### Sources
 
@@ -55,7 +58,7 @@ Search resolvers are declarative bridges between sources. When a source returns 
 
 > LDAP stores each user's GitHub username in a custom attribute (`githubUsername`). When a search finds an LDAP key, the resolver automatically fetches the user's GitHub GPG keys too.
 
-Resolvers are configured in TOML and are evaluated with a configurable depth limit (default: 2) to prevent infinite loops.
+Resolvers are configured in TOML and are evaluated with a configurable depth limit (top-level `resolver_max_depth` key, default: 2) to prevent infinite loops.
 
 ### Priority
 
@@ -111,7 +114,7 @@ docker run --env-file .env \
 ### From source (uv)
 
 ```bash
-git clone https://github.com/your-org/hokeypokey.git
+git clone https://github.com/tholent/hokeypokey.git
 cd hokeypokey
 uv sync
 uv run hokeypokey --config hokeypokey.toml
@@ -127,6 +130,7 @@ Configuration is via a single TOML file (default: `hokeypokey.toml`). See `hokey
 [server]
 host = "0.0.0.0"           # Bind address
 port = 11371               # Standard HKP port
+access_log = true          # HTTP access log to stdout (default: true)
 # tls_cert = "/path/to/cert.pem"  # Optional: TLS certificate for HKPS
 # tls_key  = "/path/to/key.pem"   # Optional: TLS key for HKPS
 ```
@@ -137,6 +141,31 @@ port = 11371               # Standard HKP port
 [cache]
 backend = "memory"         # Currently only "memory" is supported
 default_ttl = "10m"        # Default time before freshness re-validation
+max_size = 10000           # LRU-evicted key limit (default: 10000; 0 = unlimited)
+max_stale = "1h"           # Serve-stale ceiling past TTL when upstream errors
+```
+
+### Rate Limiting
+
+Lookups fan out to upstream sources on cache miss, so `/pks/lookup` is rate limited per client (token bucket, on by default):
+
+```toml
+[rate_limit]
+enabled = true             # Default: true
+requests = 60              # Allowed lookups per client per window
+window = "1m"              # Window duration
+# Trust X-Forwarded-For for client identity. Enable ONLY behind a trusted
+# reverse proxy (e.g. the bundled Caddy) — otherwise clients can spoof it.
+trust_forwarded_for = false
+```
+
+Clients over the limit receive `429 Too Many Requests` with a `Retry-After` header.
+
+### Resolver Depth
+
+```toml
+# Top-level key (place above the first [section] in the file)
+resolver_max_depth = 2     # Levels of cross-source resolver chaining (default: 2)
 ```
 
 ### LDAP Source
@@ -156,6 +185,7 @@ bind_password_env = "LDAP_BIND_PASSWORD"  # Never store password in config!
 key_attribute = "pgpKey"   # LDAP attribute containing the PGP key
 search_filter = "(pgpKey=*)"  # Base filter for all searches
 # fingerprint_attribute = "pgpCertID"  # Optional: enables fingerprint lookup
+timeout = "10s"            # Connect/receive timeout for LDAP operations
 
 # Field mappings: logical field name → LDAP attribute
 [sources.config.fields]
@@ -177,6 +207,7 @@ ttl = "15m"
 [sources.config]
 token_env = "GITHUB_TOKEN"  # Never store token in config!
 # api_base = "https://github.example.com/api/v3"  # For GitHub Enterprise
+max_email_results = 5       # Cap user matches fetched per email search
 
 # Field mappings: logical field name → GitHub response field
 [sources.config.fields]
@@ -199,13 +230,15 @@ When an LDAP search result contains a `github_id` field, this resolver automatic
 
 ### Duration Format
 
-Durations are specified as strings with combinations of hours, minutes, and seconds:
+Durations are specified as strings with combinations of days, hours, minutes, and seconds:
 
 - `"30s"` — 30 seconds
 - `"5m"` — 5 minutes
 - `"1h"` — 1 hour
 - `"2h30m"` — 2 hours and 30 minutes
 - `"1h15m30s"` — 1 hour, 15 minutes, and 30 seconds
+- `"7d"` — 7 days
+- `"1d12h"` — 1 day and 12 hours
 
 ### Credentials
 
@@ -275,6 +308,10 @@ Hokeypokey implements the read-only portion of the HKP specification. All respon
 | GET | `/pks/lookup` | `op=index&search=...` | Machine-readable key index |
 | GET | `/pks/lookup` | `op=vindex&search=...` | Verbose key index (same as index) |
 | POST | `/pks/add` | — | Always returns 403 Forbidden (read-only) |
+| GET | `/healthz` | — | Liveness/readiness probe (plain text) |
+| GET | `/stats` | — | Cache and source statistics (JSON) |
+
+`/pks/lookup` is rate limited per client (see [Rate Limiting](#rate-limiting)); over-limit requests receive `429` with a `Retry-After` header.
 
 ### Search Parameter Formats
 
@@ -300,9 +337,9 @@ The `search` parameter supports multiple formats:
 **`op=index`** and **`op=vindex`** return machine-readable key listings:
 
 ```
-info:1:1
-pub:<keyid>:<algo>:<keylen>:<creationdate>:<expirationdate>:<flags>
-uid:<uidhash>:<creationdate>:<expirationdate>:<flags>:<uid>
+info:1:<count>
+pub:<fingerprint>:<algo>:<keylen>:<creationdate>:<expirationdate>:<flags>
+uid:<percent-encoded uid>:<creationdate>:<expirationdate>:<flags>
 ```
 
 ## CLI Reference
@@ -323,12 +360,12 @@ To add a new key source (e.g., a custom directory system), subclass `KeySource` 
 
 ```python
 from hokeypokey.sources.base import KeySource
-from hokeypokey.models import FieldDefinition, SourceKey
+from hokeypokey.models import FieldDefinition, SearchResult, SourceKey
 
 class MyCustomSource(KeySource):
     """Custom key source plugin."""
 
-    async def search(self, query: str, field: str = "email") -> list[SourceKey]:
+    async def search(self, query: str, field: str = "email") -> SearchResult:
         """Search for keys matching query against the named field.
 
         Args:
@@ -336,11 +373,13 @@ class MyCustomSource(KeySource):
             field: The logical field name to search against
 
         Returns:
-            List of matching SourceKey objects with metadata and freshness tokens
+            A SearchResult bundling matched keys (SourceKey objects with
+            metadata and freshness tokens) and metadata-only entries that
+            matched the query but carry no PGP key (these can still
+            trigger cross-source resolvers)
         """
         # Implement your search logic here
-        # Return a list of SourceKey objects
-        ...
+        return SearchResult(keys=[], metadata_only=[])
 
     async def fetch_by_fingerprint(self, fingerprint: str) -> SourceKey | None:
         """Fetch a specific key by its fingerprint.
@@ -353,6 +392,17 @@ class MyCustomSource(KeySource):
         """
         # Implement fingerprint-based lookup
         # Return None if your source doesn't support this
+        ...
+
+    # Optional override — only needed if your source cannot look keys up
+    # by fingerprint. The default implementation delegates to
+    # fetch_by_fingerprint().
+    async def refetch(self, fingerprint: str, freshness_token: str) -> SourceKey | None:
+        """Re-fetch a key that failed its freshness check.
+
+        Use the freshness token you issued to locate the key. Return None
+        only when the key is genuinely gone (it will be evicted).
+        """
         ...
 
     async def check_freshness(self, fingerprint: str, token: str) -> bool:
@@ -417,10 +467,11 @@ priority = 20
 
 ### Key Concepts
 
-- **Freshness token**: An opaque string your source defines and later uses in `check_freshness()`. Examples: LDAP `modifyTimestamp`, HTTP `ETag`, database row version, etc.
+- **Freshness token**: An opaque string your source defines and later uses in `check_freshness()` and `refetch()`. Examples: LDAP `modifyTimestamp`, HTTP `ETag`, database row version, etc.
 - **SourceKey**: Bundles the raw ASCII-armored (or binary) public key data, the fingerprint, a dict of metadata/index field values, and a source-specific freshness token.
+- **SearchResult**: What `search()` returns — matched keys plus metadata-only entries (matches without a PGP key) that can still trigger cross-source resolvers.
 - **Searchable fields**: Declare what fields your source can search against via `searchable_fields()`. Field names must be globally unique across all sources.
-- **Fingerprint lookup**: If your source doesn't support fingerprint-based lookup, return `None` from `fetch_by_fingerprint()`. The system will rely on other sources or prior cache entries.
+- **Fingerprint lookup**: If your source doesn't support fingerprint-based lookup, return `None` from `fetch_by_fingerprint()` — but then also override `refetch()` so stale keys can be refreshed via their freshness token instead of being evicted.
 
 ## Architecture
 
@@ -478,7 +529,7 @@ priority = 20
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/hokeypokey.git
+git clone https://github.com/tholent/hokeypokey.git
 cd hokeypokey
 
 # Install dependencies (including dev tools)
@@ -496,6 +547,10 @@ uv run ruff check src/
 # Format code
 uv run ruff format src/
 ```
+
+## Dependency Notes
+
+hokeypokey uses [pgpy](https://github.com/SecurityInnovation/PGPy) 0.6.x for PGP key parsing. pgpy is effectively unmaintained (last release 2023) and relies on the stdlib `imghdr` module removed in Python 3.13 — hokeypokey ships a compatibility shim (`hokeypokey._compat`) that keeps it working. Because the PGP parser is the security-critical dependency of a keyserver, migrating to a maintained alternative (e.g. the PGPy13 fork, or Sequoia's `sop` tooling) is planned; the parsing surface is isolated to `hkp/formatter.py` and the source plugins to keep that migration small.
 
 ## License
 
