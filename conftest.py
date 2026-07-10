@@ -1,13 +1,10 @@
-"""Root conftest.py — applies compatibility shims before any imports."""
+"""Root conftest.py — applies compatibility shims before any imports.
+
+The shims live in ``hokeypokey._compat`` (also imported by the package
+``__init__``); importing it here guarantees they are installed before any
+test module imports pgpy directly.
+"""
 
 from __future__ import annotations
 
-import sys
-import types
-
-# pgpy 0.6.0 uses `imghdr` which was removed in Python 3.13.
-# Inject a minimal shim so pgpy can be imported.
-if "imghdr" not in sys.modules:
-    _imghdr = types.ModuleType("imghdr")
-    _imghdr.what = lambda *a, **kw: None  # type: ignore[attr-defined]
-    sys.modules["imghdr"] = _imghdr
+import hokeypokey._compat  # noqa: F401  — imported for side effects
