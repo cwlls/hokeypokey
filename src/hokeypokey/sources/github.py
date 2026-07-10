@@ -33,6 +33,8 @@ class GitHubSource(KeySource):
     ==================  ============================================================
     ``token_env``       Environment variable holding the GitHub personal access token
     ``api_base``        GitHub API base URL (default: ``https://api.github.com``)
+    ``max_email_results`` Maximum user-search matches to fetch keys for during an
+                        email search (default: 5).  Caps upstream amplification.
     ``fields``          Mapping of logical field name → GitHub response field name.
                         Supported GitHub field names: ``"login"`` (username),
                         ``"email"`` (primary email from user search).
@@ -57,6 +59,7 @@ class GitHubSource(KeySource):
 
         self._api_base: str = config.get("api_base", _DEFAULT_API_BASE).rstrip("/")
         self._fields: dict[str, str] = dict(config.get("fields", {}))
+        self._max_email_results: int = int(config.get("max_email_results", 5))
 
         # Resolve token from environment
         token: str | None = None
@@ -131,6 +134,27 @@ class GitHubSource(KeySource):
 
     async def fetch_by_fingerprint(self, fingerprint: str) -> SourceKey | None:
         """Not supported — GitHub has no fingerprint-based key lookup API."""
+        return None
+
+    async def refetch(self, fingerprint: str, freshness_token: str) -> SourceKey | None:
+        """Re-fetch a stale key via the username stored in its freshness token.
+
+        GitHub cannot look keys up by fingerprint, so the default
+        ``refetch → fetch_by_fingerprint`` path would always return ``None``
+        and cause the orchestrator to evict keys whose ETag merely changed
+        (e.g. because the user *added* a key).  Instead, re-fetch all of the
+        user's keys and return the one matching *fingerprint*, or ``None``
+        only when the key is genuinely gone from the account.
+        """
+        if _FRESHNESS_SEP not in freshness_token:
+            return None
+        username, _ = freshness_token.split(_FRESHNESS_SEP, 1)
+        if not username:
+            return None
+        keys = await self._fetch_keys_for_username(username)
+        for key in keys:
+            if key.fingerprint == fingerprint:
+                return key
         return None
 
     async def check_freshness(self, fingerprint: str, token: str) -> bool:
@@ -279,6 +303,16 @@ class GitHubSource(KeySource):
         except Exception as exc:
             logger.warning("Failed to parse GitHub user search response: %s", exc)
             return []
+
+        if len(users) > self._max_email_results:
+            logger.info(
+                "GitHub email search for source %r matched %d users; "
+                "fetching keys for the first %d only",
+                self.name,
+                len(users),
+                self._max_email_results,
+            )
+            users = users[: self._max_email_results]
 
         all_keys: list[SourceKey] = []
         for user in users:

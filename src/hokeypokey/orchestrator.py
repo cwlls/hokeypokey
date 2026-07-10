@@ -60,15 +60,31 @@ class SearchOrchestrator:
         cache: KeyCache,
         resolvers: list[ConfigResolver],
         max_depth: int = 2,
+        max_stale: float = 3600.0,
     ) -> None:
         self._sources = sources
         self._cache = cache
         self._resolvers = resolvers
         self._max_depth = max_depth
+        # How long past its TTL an entry may still be served when the
+        # upstream source is unreachable ("serve stale" ceiling).
+        self._max_stale = max_stale
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def source_names(self) -> list[str]:
+        """Names of all configured sources, in registration order."""
+        return list(self._sources.keys())
+
+    def stats(self) -> dict[str, Any]:
+        """Operational statistics for the ``/stats`` endpoint."""
+        return {
+            "cache": self._cache.stats(),
+            "sources": self.source_names,
+        }
 
     async def lookup(self, parsed: ParsedSearch) -> list[SourceKey]:
         """Return all keys matching *parsed*, using cache + sources + resolvers.
@@ -187,25 +203,45 @@ class SearchOrchestrator:
             fp = entry.source_key.fingerprint
             if isinstance(result, Exception):
                 logger.warning("Freshness check failed for %s: %s", fp, result)
-                collected_fps.add(fp)  # serve stale rather than nothing
+                self._serve_stale_or_drop(entry, collected_fps)
             elif result:
                 entry.touch()  # still fresh — touch the TTL clock
                 collected_fps.add(fp)
             else:
-                await self._refetch_stale(fp, entry.source_key.source_name, collected_fps)
+                await self._refetch_stale(entry, collected_fps)
+
+    def _serve_stale_or_drop(self, entry: CachedKey, collected_fps: set[str]) -> None:
+        """Serve a stale entry despite an upstream error, within the staleness ceiling.
+
+        Serving stale keeps the keyserver available through upstream outages,
+        but must not be unbounded: a revoked key should not be servable forever
+        just because its source stays unreachable.  Entries older than
+        ``ttl + max_stale`` are dropped instead.
+        """
+        fp = entry.source_key.fingerprint
+        if entry.is_beyond_stale(self._max_stale):
+            logger.warning(
+                "Dropping %s: upstream unavailable and entry exceeded the "
+                "serve-stale ceiling (%.0fs past TTL)",
+                fp,
+                self._max_stale,
+            )
+            self._cache.remove(fp)
+        else:
+            collected_fps.add(fp)  # serve stale rather than nothing
 
     async def _refetch_stale(
         self,
-        fp: str,
-        source_name: str,
+        entry: CachedKey,
         collected_fps: set[str],
     ) -> None:
         """Attempt to refetch a key that failed its freshness check."""
-        source = self._sources.get(source_name)
+        fp = entry.source_key.fingerprint
+        source = self._sources.get(entry.source_key.source_name)
         if source is None:
             return
         try:
-            new_key = await source.fetch_by_fingerprint(fp)
+            new_key = await source.refetch(fp, entry.freshness_token)
             if new_key is not None:
                 self._cache.put(new_key, ttl=source.ttl)
                 collected_fps.add(fp)
@@ -213,7 +249,7 @@ class SearchOrchestrator:
                 self._cache.remove(fp)  # key no longer exists in source
         except Exception as exc:
             logger.warning("Refetch failed for %s: %s", fp, exc)
-            collected_fps.add(fp)  # serve stale
+            self._serve_stale_or_drop(entry, collected_fps)
 
     async def _cache_miss_fan_out(
         self,

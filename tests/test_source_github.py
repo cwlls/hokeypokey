@@ -262,6 +262,91 @@ async def test_fetch_by_fingerprint_returns_none():
 
 
 # ---------------------------------------------------------------------------
+# refetch — must NOT evict keys whose ETag merely changed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refetch_returns_key_still_present(
+    httpx_mock: HTTPXMock, test_armor, test_fingerprint
+):
+    """A stale key that still exists on the account is re-fetched, not lost."""
+    source = make_github_source()
+    token = f'octocat{_FRESHNESS_SEP}"old-etag"'
+
+    httpx_mock.add_response(
+        url="https://api.github.com/users/octocat/gpg_keys",
+        json=[make_gpg_key_response(test_armor, "octocat")],
+        headers={"ETag": '"new-etag"'},
+    )
+
+    result = await source.refetch(test_fingerprint, token)
+    await source.close()
+
+    assert result is not None
+    assert result.fingerprint == test_fingerprint
+    assert "new-etag" in result.freshness_token
+
+
+@pytest.mark.asyncio
+async def test_refetch_returns_none_when_key_removed(httpx_mock: HTTPXMock, test_fingerprint):
+    """refetch returns None only when the key is genuinely gone from the account."""
+    source = make_github_source()
+    token = f'octocat{_FRESHNESS_SEP}"old-etag"'
+
+    httpx_mock.add_response(
+        url="https://api.github.com/users/octocat/gpg_keys",
+        json=[],  # user removed all keys
+        headers={"ETag": '"new-etag"'},
+    )
+
+    result = await source.refetch(test_fingerprint, token)
+    await source.close()
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_refetch_invalid_token_returns_none():
+    source = make_github_source()
+    result = await source.refetch("A" * 40, "no-separator")
+    await source.close()
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Email fan-out cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_by_email_caps_user_fanout(httpx_mock: HTTPXMock, test_armor):
+    """Only max_email_results users get their keys fetched after an email search."""
+    source = make_github_source({"max_email_results": 1})
+
+    httpx_mock.add_response(
+        url="https://api.github.com/search/users?q=alice%40example.com+in%3Aemail",
+        json={
+            "items": [{"login": "alice"}, {"login": "bob"}, {"login": "carol"}],
+            "total_count": 3,
+        },
+    )
+    # Only the first user's keys may be fetched.
+    httpx_mock.add_response(
+        url="https://api.github.com/users/alice/gpg_keys",
+        json=[make_gpg_key_response(test_armor, "alice")],
+        headers={"ETag": '"etag-alice"'},
+    )
+
+    result = await source.search("alice@example.com", "email")
+    await source.close()
+
+    assert len(result.keys) == 1
+    requested_urls = [str(req.url) for req in httpx_mock.get_requests()]
+    assert not any("/users/bob/" in url or "/users/carol/" in url for url in requested_urls)
+
+
+# ---------------------------------------------------------------------------
 # Unknown field
 # ---------------------------------------------------------------------------
 

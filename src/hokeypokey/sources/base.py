@@ -86,6 +86,24 @@ class KeySource(ABC):
         """
         ...
 
+    async def refetch(self, fingerprint: str, freshness_token: str) -> SourceKey | None:
+        """Re-fetch a key that failed its freshness check.
+
+        The default implementation delegates to :meth:`fetch_by_fingerprint`.
+        Sources that cannot look keys up by fingerprint (e.g. GitHub) should
+        override this and use the *freshness_token* they issued to locate the
+        key instead.
+
+        Args:
+            fingerprint:     Uppercase hex fingerprint of the stale key.
+            freshness_token: The opaque token stored when the key was cached.
+
+        Returns:
+            The refreshed :class:`~hokeypokey.models.SourceKey`, or ``None``
+            if the key no longer exists in this source.
+        """
+        return await self.fetch_by_fingerprint(fingerprint)
+
     @abstractmethod
     async def check_freshness(self, fingerprint: str, token: str) -> bool:
         """Check whether a previously-cached key is still current.

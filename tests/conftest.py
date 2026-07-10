@@ -96,6 +96,7 @@ def make_mock_source(
     )
     source.search = AsyncMock(return_value=_sr)
     source.fetch_by_fingerprint = AsyncMock(return_value=fetch_result)
+    source.refetch = AsyncMock(return_value=fetch_result)
     source.check_freshness = AsyncMock(return_value=freshness_result)
     source.close = AsyncMock()
     return source

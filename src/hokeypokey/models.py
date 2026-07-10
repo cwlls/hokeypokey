@@ -94,6 +94,15 @@ class CachedKey:
         """Return True if the entry is still within its TTL window."""
         return (self.cached_at + self.ttl) > time.time()
 
+    def is_beyond_stale(self, max_stale: float) -> bool:
+        """Return True if the entry is more than *max_stale* seconds past its TTL.
+
+        Used by the orchestrator's serve-stale-on-error path: entries beyond
+        this ceiling are dropped rather than served, so upstream outages
+        cannot keep a revoked key alive indefinitely.
+        """
+        return time.time() > self.cached_at + self.ttl + max_stale
+
     def touch(self) -> None:
         """Reset the TTL clock, marking the entry as freshly validated."""
         self.cached_at = time.time()

@@ -183,7 +183,7 @@ async def test_stale_cache_freshness_fails_refetch(alice_armor, alice_fingerprin
 
     assert resp.status_code == 200
     ldap.check_freshness.assert_called_once()
-    ldap.fetch_by_fingerprint.assert_called_once()
+    ldap.refetch.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

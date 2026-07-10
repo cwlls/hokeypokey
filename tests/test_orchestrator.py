@@ -62,6 +62,7 @@ def make_mock_source(
     ]
     source.search = AsyncMock(return_value=SearchResult(keys=search_result or []))
     source.fetch_by_fingerprint = AsyncMock(return_value=fetch_result)
+    source.refetch = AsyncMock(return_value=fetch_result)
     source.check_freshness = AsyncMock(return_value=freshness_result)
     return source
 
@@ -72,9 +73,11 @@ def make_orchestrator(
     resolvers: list | None = None,
     max_depth: int = 2,
 ) -> SearchOrchestrator:
+    # `cache if ... is not None` rather than `cache or ...`: an empty KeyCache
+    # has len() == 0 and is falsy, so `or` would silently swap in a new cache.
     return SearchOrchestrator(
         sources=sources or {},
-        cache=cache or KeyCache(),
+        cache=cache if cache is not None else KeyCache(),
         resolvers=resolvers or [],
         max_depth=max_depth,
     )
@@ -101,6 +104,7 @@ async def test_cache_hit_fresh_no_source_calls():
     assert results[0].fingerprint == FP_ALICE
     source.search.assert_not_called()
     source.fetch_by_fingerprint.assert_not_called()
+    source.refetch.assert_not_called()
     source.check_freshness.assert_not_called()
 
 
@@ -127,7 +131,7 @@ async def test_cache_hit_stale_freshness_passes():
 
     assert len(results) == 1
     source.check_freshness.assert_called_once()
-    source.fetch_by_fingerprint.assert_not_called()
+    source.refetch.assert_not_called()
     source.search.assert_not_called()
 
 
@@ -138,7 +142,7 @@ async def test_cache_hit_stale_freshness_passes():
 
 @pytest.mark.asyncio
 async def test_cache_hit_stale_freshness_fails_refetch():
-    """Stale cache hit + freshness check fails → source.fetch_by_fingerprint called."""
+    """Stale cache hit + freshness check fails → source.refetch called."""
     cache = KeyCache()
     key = make_source_key(FP_ALICE)
     cache.put(key, ttl=300)
@@ -154,7 +158,7 @@ async def test_cache_hit_stale_freshness_fails_refetch():
 
     assert len(results) == 1
     source.check_freshness.assert_called_once()
-    source.fetch_by_fingerprint.assert_called_once_with(FP_ALICE)
+    source.refetch.assert_called_once_with(FP_ALICE, "token-1")
 
     # Cache should now have the updated token
     refreshed = cache.get_by_fingerprint(FP_ALICE)
@@ -486,3 +490,93 @@ async def test_get_key_returns_none_when_not_found():
 
     result = await orch.get_key(parse_search("nobody@example.com"))
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Serve-stale ceiling (max_stale)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_upstream_error_serves_stale_within_ceiling():
+    """Freshness check errors → stale entry is still served within ttl+max_stale."""
+    cache = KeyCache()
+    key = make_source_key(FP_ALICE)
+    cache.put(key, ttl=300)
+
+    entry = cache.get_by_fingerprint(FP_ALICE)
+    entry.cached_at = time.time() - 400  # 100s past TTL, well inside the ceiling
+
+    source = make_mock_source()
+    source.check_freshness = AsyncMock(side_effect=RuntimeError("upstream down"))
+    orch = SearchOrchestrator(
+        sources={"ldap": source}, cache=cache, resolvers=[], max_stale=3600
+    )
+
+    results = await orch.lookup(parse_search("alice@example.com"))
+
+    assert len(results) == 1
+    assert results[0].fingerprint == FP_ALICE
+
+
+@pytest.mark.asyncio
+async def test_upstream_error_beyond_ceiling_drops_entry():
+    """Freshness check errors + entry beyond ttl+max_stale → dropped, not served."""
+    cache = KeyCache()
+    key = make_source_key(FP_ALICE)
+    cache.put(key, ttl=300)
+
+    entry = cache.get_by_fingerprint(FP_ALICE)
+    entry.cached_at = time.time() - 400  # 100s past TTL
+
+    source = make_mock_source()
+    source.check_freshness = AsyncMock(side_effect=RuntimeError("upstream down"))
+    orch = SearchOrchestrator(
+        sources={"ldap": source}, cache=cache, resolvers=[], max_stale=50  # ceiling exceeded
+    )
+
+    results = await orch.lookup(parse_search("alice@example.com"))
+
+    assert results == []
+    assert cache.get_by_fingerprint(FP_ALICE) is None
+
+
+@pytest.mark.asyncio
+async def test_refetch_error_beyond_ceiling_drops_entry():
+    """Refetch errors + entry beyond the stale ceiling → dropped, not served."""
+    cache = KeyCache()
+    key = make_source_key(FP_ALICE)
+    cache.put(key, ttl=300)
+
+    entry = cache.get_by_fingerprint(FP_ALICE)
+    entry.cached_at = time.time() - 400
+
+    source = make_mock_source(freshness_result=False)
+    source.refetch = AsyncMock(side_effect=RuntimeError("upstream down"))
+    orch = SearchOrchestrator(
+        sources={"ldap": source}, cache=cache, resolvers=[], max_stale=50
+    )
+
+    results = await orch.lookup(parse_search("alice@example.com"))
+
+    assert results == []
+    assert cache.get_by_fingerprint(FP_ALICE) is None
+
+
+# ---------------------------------------------------------------------------
+# source_names / stats
+# ---------------------------------------------------------------------------
+
+
+def test_source_names_lists_sources():
+    orch = make_orchestrator(sources={"ldap": make_mock_source(), "gh": make_mock_source("gh")})
+    assert orch.source_names == ["ldap", "gh"]
+
+
+def test_stats_reports_cache_and_sources():
+    cache = KeyCache(max_size=5)
+    orch = make_orchestrator(sources={"ldap": make_mock_source()}, cache=cache)
+    stats = orch.stats()
+    assert stats["sources"] == ["ldap"]
+    assert stats["cache"]["size"] == 0
+    assert stats["cache"]["max_size"] == 5
