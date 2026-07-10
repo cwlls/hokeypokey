@@ -153,7 +153,7 @@ def _parse_cache(raw: dict[str, Any]) -> CacheConfig:
             raise ConfigError(
                 f"cache.max_size must be a positive integer, or 0 for unlimited; got {max_size}."
             )
-        cfg.max_size = max_size if max_size > 0 else None  # 0 = unlimited
+        cfg.max_size = max_size if max_size > 0 else None  # treat 0 as unlimited
     if "max_stale" in raw:
         cfg.max_stale = parse_duration(str(raw["max_stale"]))
     return cfg

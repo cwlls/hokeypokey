@@ -51,19 +51,10 @@ def test_invalid_hex_chars():
         parse_search("0xZZZZ1234")
 
 
-def test_invalid_hex_length_9():
-    with pytest.raises(ValueError, match="9 hex characters"):
-        parse_search("0x" + "A" * 9)
-
-
-def test_invalid_hex_length_7():
-    with pytest.raises(ValueError, match="7 hex characters"):
-        parse_search("0x" + "A" * 7)
-
-
-def test_invalid_hex_length_32():
-    with pytest.raises(ValueError, match="32 hex characters"):
-        parse_search("0x" + "A" * 32)
+@pytest.mark.parametrize("n", [7, 9, 32])
+def test_invalid_hex_length(n):
+    with pytest.raises(ValueError, match=f"{n} hex characters"):
+        parse_search("0x" + "A" * n)
 
 
 def test_empty_after_0x_prefix():
