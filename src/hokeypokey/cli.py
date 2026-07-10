@@ -106,6 +106,8 @@ def run(
 
     hc = hypercorn.config.Config()
     hc.bind = [f"{config.server.host}:{config.server.port}"]
+    if config.server.access_log:
+        hc.accesslog = "-"  # HTTP access log to stdout
     if config.server.tls_cert and config.server.tls_key:
         hc.certfile = config.server.tls_cert
         hc.keyfile = config.server.tls_key

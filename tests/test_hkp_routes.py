@@ -225,7 +225,7 @@ async def test_landing_page_escapes_source_names():
     app.register_blueprint(hkp_bp)
 
     mock_orchestrator = MagicMock()
-    mock_orchestrator._sources = {xss_name: MagicMock()}
+    mock_orchestrator.source_names = [xss_name]
     app.extensions = {"orchestrator": mock_orchestrator}
 
     async with app.test_client() as client:
@@ -243,8 +243,8 @@ async def test_landing_page_escapes_source_names():
 async def test_landing_page_returns_200():
     """GET / returns 200 with HTML content-type."""
     app = make_test_app()
-    # Patch orchestrator to expose _sources
-    app.extensions["orchestrator"]._sources = {"my-source": MagicMock()}
+    # Patch orchestrator to expose source_names
+    app.extensions["orchestrator"].source_names = ["my-source"]
 
     async with app.test_client() as client:
         resp = await client.get("/")
@@ -276,7 +276,7 @@ async def test_options_preflight_returns_204():
 @pytest.mark.asyncio
 async def test_healthz_returns_ok_with_source_count():
     app = make_test_app()
-    app.extensions["orchestrator"]._sources = {"src1": MagicMock(), "src2": MagicMock()}
+    app.extensions["orchestrator"].source_names = ["src1", "src2"]
     async with app.test_client() as client:
         resp = await client.get("/healthz")
     assert resp.status_code == 200
@@ -288,9 +288,76 @@ async def test_healthz_returns_ok_with_source_count():
 @pytest.mark.asyncio
 async def test_healthz_zero_sources():
     app = make_test_app()
-    app.extensions["orchestrator"]._sources = {}
+    app.extensions["orchestrator"].source_names = []
     async with app.test_client() as client:
         resp = await client.get("/healthz")
     assert resp.status_code == 200
     body = await resp.get_data(as_text=True)
     assert "sources: 0" in body
+
+
+# ---------------------------------------------------------------------------
+# GET /stats
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stats_returns_json():
+    app = make_test_app()
+    app.extensions["orchestrator"].stats = MagicMock(
+        return_value={"cache": {"size": 0, "max_size": 10, "hits": 1, "misses": 2}, "sources": []}
+    )
+    async with app.test_client() as client:
+        resp = await client.get("/stats")
+    assert resp.status_code == 200
+    assert "application/json" in resp.content_type
+    payload = await resp.get_json()
+    assert payload["cache"]["size"] == 0
+    assert payload["sources"] == []
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+
+def make_rate_limited_app(requests: int = 2, window: float = 60.0):
+    from hokeypokey.ratelimit import RateLimiter
+
+    app = make_test_app(lookup_result=[make_source_key()])
+    app.extensions["rate_limiter"] = RateLimiter(requests=requests, window=window)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_returns_429_when_exceeded():
+    app = make_rate_limited_app(requests=2)
+    async with app.test_client() as client:
+        r1 = await client.get(f"/pks/lookup?op=get&search=0x{FP}")
+        r2 = await client.get(f"/pks/lookup?op=get&search=0x{FP}")
+        r3 = await client.get(f"/pks/lookup?op=get&search=0x{FP}")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r3.status_code == 429
+    assert r3.headers.get("Retry-After") is not None
+    assert r3.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_does_not_apply_to_healthz():
+    app = make_rate_limited_app(requests=1)
+    app.extensions["orchestrator"].source_names = []
+    async with app.test_client() as client:
+        await client.get(f"/pks/lookup?op=get&search=0x{FP}")
+        await client.get(f"/pks/lookup?op=get&search=0x{FP}")  # exhausts the bucket
+        resp = await client.get("/healthz")
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_no_rate_limiter_configured_allows_all():
+    app = make_test_app(lookup_result=[make_source_key()])
+    async with app.test_client() as client:
+        for _ in range(5):
+            resp = await client.get(f"/pks/lookup?op=get&search=0x{FP}")
+            assert resp.status_code == 200

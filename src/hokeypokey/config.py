@@ -68,13 +68,26 @@ class ServerConfig:
     port: int = 11371
     tls_cert: str | None = None
     tls_key: str | None = None
+    access_log: bool = True  # write HTTP access log to stdout
 
 
 @dataclass
 class CacheConfig:
     backend: Literal["memory"] = "memory"
     default_ttl: int = 600  # 10 minutes
-    max_size: int | None = None  # None = unlimited; set to enable LRU eviction
+    max_size: int | None = 10_000  # None (config value 0) = unlimited
+    max_stale: int = 3600  # serve-stale ceiling past TTL when upstream errors
+
+
+@dataclass
+class RateLimitConfig:
+    enabled: bool = True
+    requests: int = 60  # allowed lookups per client per window
+    window: int = 60  # window in seconds
+    # Trust X-Forwarded-For for the client identity. Enable ONLY behind a
+    # trusted reverse proxy (e.g. the bundled Caddy), otherwise clients can
+    # spoof the header to bypass their limit.
+    trust_forwarded_for: bool = False
 
 
 @dataclass
@@ -101,6 +114,8 @@ class AppConfig:
     cache: CacheConfig
     sources: list[SourceConfig]
     resolvers: list[ResolverConfig]
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    resolver_max_depth: int = 2  # levels of cross-source resolver chaining
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +133,8 @@ def _parse_server(raw: dict[str, Any]) -> ServerConfig:
         cfg.tls_cert = str(raw["tls_cert"])
     if "tls_key" in raw and raw["tls_key"]:
         cfg.tls_key = str(raw["tls_key"])
+    if "access_log" in raw:
+        cfg.access_log = bool(raw["access_log"])
     return cfg
 
 
@@ -132,9 +149,32 @@ def _parse_cache(raw: dict[str, Any]) -> CacheConfig:
         cfg.default_ttl = parse_duration(str(raw["default_ttl"]))
     if "max_size" in raw:
         max_size = int(raw["max_size"])
-        if max_size <= 0:
-            raise ConfigError(f"cache.max_size must be a positive integer, got {max_size}.")
-        cfg.max_size = max_size
+        if max_size < 0:
+            raise ConfigError(
+                f"cache.max_size must be a positive integer, or 0 for unlimited; got {max_size}."
+            )
+        cfg.max_size = max_size if max_size > 0 else None  # 0 = unlimited
+    if "max_stale" in raw:
+        cfg.max_stale = parse_duration(str(raw["max_stale"]))
+    return cfg
+
+
+def _parse_rate_limit(raw: dict[str, Any]) -> RateLimitConfig:
+    cfg = RateLimitConfig()
+    if "enabled" in raw:
+        cfg.enabled = bool(raw["enabled"])
+    if "requests" in raw:
+        requests = int(raw["requests"])
+        if requests <= 0:
+            raise ConfigError(
+                f"rate_limit.requests must be a positive integer, got {requests}. "
+                f"Use enabled = false to disable rate limiting."
+            )
+        cfg.requests = requests
+    if "window" in raw:
+        cfg.window = parse_duration(str(raw["window"]))
+    if "trust_forwarded_for" in raw:
+        cfg.trust_forwarded_for = bool(raw["trust_forwarded_for"])
     return cfg
 
 
@@ -231,9 +271,23 @@ def load_config(path: Path) -> AppConfig:
 
     server = _parse_server(raw.get("server", {}))
     cache = _parse_cache(raw.get("cache", {}))
+    rate_limit = _parse_rate_limit(raw.get("rate_limit", {}))
     sources = [_parse_source(s) for s in raw.get("sources", [])]
     resolvers = [_parse_resolver(r) for r in raw.get("resolvers", [])]
 
-    config = AppConfig(server=server, cache=cache, sources=sources, resolvers=resolvers)
+    resolver_max_depth = int(raw.get("resolver_max_depth", 2))
+    if resolver_max_depth < 0:
+        raise ConfigError(
+            f"resolver_max_depth must be zero or a positive integer, got {resolver_max_depth}."
+        )
+
+    config = AppConfig(
+        server=server,
+        cache=cache,
+        sources=sources,
+        resolvers=resolvers,
+        rate_limit=rate_limit,
+        resolver_max_depth=resolver_max_depth,
+    )
     _validate(config)
     return config

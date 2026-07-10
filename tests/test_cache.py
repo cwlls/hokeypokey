@@ -393,3 +393,53 @@ def test_lru_search_refreshes_order():
     cache.put(make_key(FP4, email="d@example.com"), ttl=300)
     assert cache.get_by_fingerprint(FP) is not None  # protected
     assert cache.get_by_fingerprint(FP2) is None  # evicted
+
+
+# ---------------------------------------------------------------------------
+# Index hygiene — empty sets must not accumulate under churn
+# ---------------------------------------------------------------------------
+
+
+def test_deindex_purges_empty_index_entries():
+    """Removing a key must delete emptied index buckets, not leave empty sets."""
+    cache = KeyCache()
+    cache.put(make_key(FP, email="a@example.com", github_username="alice"), ttl=300)
+    cache.remove(FP)
+
+    assert FP[-16:] not in cache._by_long_id
+    assert FP[-8:] not in cache._by_short_id
+    assert "a@example.com" not in cache._by_email
+    assert "github_username" not in cache._by_field
+
+
+def test_eviction_churn_does_not_leak_index_entries():
+    """LRU churn must keep the secondary indexes bounded by cache size."""
+    cache = KeyCache(max_size=2)
+    for i in range(20):
+        fp = f"{'ABCDEF01' * 4}{i:02X}{i:02X}"
+        cache.put(make_key(fp, email=f"user{i}@example.com"), ttl=300)
+    assert len(cache) == 2
+    assert len(cache._by_email) == 2
+    assert len(cache._by_long_id) == 2
+    assert len(cache._by_short_id) == 2
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+def test_stats_counts_hits_and_misses():
+    cache = KeyCache(max_size=10)
+    cache.put(make_key(FP), ttl=300)
+
+    cache.get_by_fingerprint(FP)  # hit
+    cache.get_by_fingerprint(FP2)  # miss
+    cache.search("alice@example.com", "email")  # hit
+    cache.search("nobody@example.com", "email")  # miss
+
+    stats = cache.stats()
+    assert stats["size"] == 1
+    assert stats["max_size"] == 10
+    assert stats["hits"] == 2
+    assert stats["misses"] == 2

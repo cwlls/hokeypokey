@@ -11,7 +11,9 @@ Reference: draft-shaw-openpgp-hkp-00 / draft-gallagher-openpgp-hkp-09
 from __future__ import annotations
 
 import html
+import json
 import logging
+import math
 from typing import TYPE_CHECKING
 
 from quart import Blueprint, current_app, request
@@ -19,6 +21,7 @@ from quart.typing import ResponseReturnValue
 
 if TYPE_CHECKING:
     from hokeypokey.orchestrator import SearchOrchestrator
+    from hokeypokey.ratelimit import RateLimiter
 
 from hokeypokey import __version__
 from hokeypokey.hkp.formatter import format_get_response, format_index_response
@@ -54,6 +57,26 @@ def _orchestrator() -> SearchOrchestrator:
     return current_app.extensions["orchestrator"]  # type: ignore[no-any-return]
 
 
+def _check_rate_limit() -> ResponseReturnValue | None:
+    """Apply the per-client rate limit, if one is configured.
+
+    Returns a 429 response when the client is over its limit, or ``None``
+    when the request may proceed (including when no limiter is configured).
+    """
+    limiter: RateLimiter | None = current_app.extensions.get("rate_limiter")
+    if limiter is None:
+        return None
+    key = limiter.client_key(request.remote_addr, request.headers.get("X-Forwarded-For"))
+    allowed, retry_after = limiter.check(key)
+    if allowed:
+        return None
+    return (
+        "Rate limit exceeded. Try again later.",
+        429,
+        {**_ERR_HEADERS, "Retry-After": str(max(1, math.ceil(retry_after)))},
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /  — human-readable landing page
 # ---------------------------------------------------------------------------
@@ -62,8 +85,7 @@ def _orchestrator() -> SearchOrchestrator:
 @hkp_bp.route("/", methods=["GET"])
 async def index() -> ResponseReturnValue:
     """Return a simple HTML status page for browser visitors."""
-    orchestrator = _orchestrator()
-    source_names = list(orchestrator._sources.keys())
+    source_names = _orchestrator().source_names
     sources_html = (
         "<ul>" + "".join(f"<li><code>{html.escape(s)}</code></li>" for s in source_names) + "</ul>"
         if source_names
@@ -116,7 +138,7 @@ async def index() -> ResponseReturnValue:
   </table>
 
   <p style="margin-top:2rem; color:#888; font-size:0.85rem;">
-    <a href="https://github.com/wells/hokeypokey">hokeypokey</a> &mdash; Apache 2.0
+    <a href="https://github.com/tholent/hokeypokey">hokeypokey</a> &mdash; Apache 2.0
   </p>
 </body>
 </html>
@@ -133,6 +155,12 @@ async def index() -> ResponseReturnValue:
 async def lookup() -> ResponseReturnValue:
     if request.method == "OPTIONS":
         return ("", 204, _CORS_PREFLIGHT_HEADERS)
+
+    # Lookups fan out to upstream sources on cache miss, so this is the
+    # endpoint worth protecting from abuse.
+    rate_limited = _check_rate_limit()
+    if rate_limited is not None:
+        return rate_limited
 
     op = request.args.get("op", "").strip().lower()
     search_term = request.args.get("search", "").strip()
@@ -195,9 +223,24 @@ async def add() -> ResponseReturnValue:
 
 @hkp_bp.route("/healthz", methods=["GET"])
 async def healthz() -> ResponseReturnValue:
-    source_count = len(_orchestrator()._sources)
+    source_count = len(_orchestrator().source_names)
     return (
         f"ok\nsources: {source_count}\n",
         200,
         {**_CORS_HEADERS, "Content-Type": _PLAIN},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /stats  — operational statistics
+# ---------------------------------------------------------------------------
+
+
+@hkp_bp.route("/stats", methods=["GET"])
+async def stats() -> ResponseReturnValue:
+    """Return cache and source statistics as JSON."""
+    return (
+        json.dumps(_orchestrator().stats()),
+        200,
+        {**_CORS_HEADERS, "Content-Type": "application/json"},
     )

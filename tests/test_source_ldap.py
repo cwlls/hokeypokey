@@ -427,3 +427,24 @@ def test_plain_ldap_uri_has_no_tls():
     """Plain ldap:// URI must not attach a Tls object."""
     source = make_ldap_source({"uri": "ldap://ldap.corp.example.com"})
     assert source._server.tls is None
+
+
+# ---------------------------------------------------------------------------
+# Timeouts
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_default_is_ten_seconds():
+    source = make_ldap_source()
+    assert source._timeout == 10
+    assert source._server.connect_timeout == 10
+
+
+def test_timeout_accepts_duration_string():
+    source = make_ldap_source({"timeout": "30s"})
+    assert source._timeout == 30
+
+
+def test_timeout_accepts_integer_seconds():
+    source = make_ldap_source({"timeout": 5})
+    assert source._timeout == 5

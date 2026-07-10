@@ -318,3 +318,121 @@ def test_source_priority_must_be_positive(tmp_path):
     )
     with pytest.raises(ConfigError, match="priority must be a positive integer"):
         load_config(p)
+
+
+# ---------------------------------------------------------------------------
+# Cache: max_size / max_stale
+# ---------------------------------------------------------------------------
+
+
+def test_cache_max_size_default_is_bounded(tmp_path):
+    p = write_toml(tmp_path, "[cache]\n")
+    config = load_config(p)
+    assert config.cache.max_size == 10_000
+
+
+def test_cache_max_size_zero_means_unlimited(tmp_path):
+    p = write_toml(tmp_path, "[cache]\nmax_size = 0\n")
+    config = load_config(p)
+    assert config.cache.max_size is None
+
+
+def test_cache_max_size_negative_rejected(tmp_path):
+    p = write_toml(tmp_path, "[cache]\nmax_size = -1\n")
+    with pytest.raises(ConfigError, match="max_size"):
+        load_config(p)
+
+
+def test_cache_max_stale_parsed(tmp_path):
+    p = write_toml(tmp_path, '[cache]\nmax_stale = "30m"\n')
+    config = load_config(p)
+    assert config.cache.max_stale == 1800
+
+
+def test_cache_max_stale_default(tmp_path):
+    p = write_toml(tmp_path, "[cache]\n")
+    config = load_config(p)
+    assert config.cache.max_stale == 3600
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
+
+def test_rate_limit_defaults(tmp_path):
+    p = write_toml(tmp_path, "[server]\n")
+    config = load_config(p)
+    assert config.rate_limit.enabled is True
+    assert config.rate_limit.requests == 60
+    assert config.rate_limit.window == 60
+    assert config.rate_limit.trust_forwarded_for is False
+
+
+def test_rate_limit_section_parsed(tmp_path):
+    p = write_toml(
+        tmp_path,
+        """\
+        [rate_limit]
+        enabled = true
+        requests = 10
+        window = "30s"
+        trust_forwarded_for = true
+    """,
+    )
+    config = load_config(p)
+    assert config.rate_limit.requests == 10
+    assert config.rate_limit.window == 30
+    assert config.rate_limit.trust_forwarded_for is True
+
+
+def test_rate_limit_can_be_disabled(tmp_path):
+    p = write_toml(tmp_path, "[rate_limit]\nenabled = false\n")
+    config = load_config(p)
+    assert config.rate_limit.enabled is False
+
+
+def test_rate_limit_requests_must_be_positive(tmp_path):
+    p = write_toml(tmp_path, "[rate_limit]\nrequests = 0\n")
+    with pytest.raises(ConfigError, match="rate_limit.requests"):
+        load_config(p)
+
+
+# ---------------------------------------------------------------------------
+# Server: access_log
+# ---------------------------------------------------------------------------
+
+
+def test_access_log_default_on(tmp_path):
+    p = write_toml(tmp_path, "[server]\n")
+    config = load_config(p)
+    assert config.server.access_log is True
+
+
+def test_access_log_can_be_disabled(tmp_path):
+    p = write_toml(tmp_path, "[server]\naccess_log = false\n")
+    config = load_config(p)
+    assert config.server.access_log is False
+
+
+# ---------------------------------------------------------------------------
+# resolver_max_depth
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_max_depth_default(tmp_path):
+    p = write_toml(tmp_path, "[server]\n")
+    config = load_config(p)
+    assert config.resolver_max_depth == 2
+
+
+def test_resolver_max_depth_parsed(tmp_path):
+    p = write_toml(tmp_path, "resolver_max_depth = 3\n")
+    config = load_config(p)
+    assert config.resolver_max_depth == 3
+
+
+def test_resolver_max_depth_negative_rejected(tmp_path):
+    p = write_toml(tmp_path, "resolver_max_depth = -1\n")
+    with pytest.raises(ConfigError, match="resolver_max_depth"):
+        load_config(p)

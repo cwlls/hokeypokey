@@ -10,6 +10,7 @@ from hokeypokey.cache import KeyCache
 from hokeypokey.config import AppConfig
 from hokeypokey.hkp.routes import hkp_bp
 from hokeypokey.orchestrator import SearchOrchestrator
+from hokeypokey.ratelimit import RateLimiter
 from hokeypokey.resolver import ConfigResolver
 from hokeypokey.sources import get_source_class
 from hokeypokey.sources.base import KeySource
@@ -71,10 +72,27 @@ def create_app(config: AppConfig) -> Quart:
         sources=sources,
         cache=cache,
         resolvers=resolvers,
+        max_depth=config.resolver_max_depth,
+        max_stale=config.cache.max_stale,
     )
 
     # Store on app so routes can access it via current_app.extensions
     app.extensions["orchestrator"] = orchestrator
+
+    # ---- Rate limiter ----
+    if config.rate_limit.enabled:
+        app.extensions["rate_limiter"] = RateLimiter(
+            requests=config.rate_limit.requests,
+            window=config.rate_limit.window,
+            trust_forwarded_for=config.rate_limit.trust_forwarded_for,
+        )
+        logger.info(
+            "Rate limiting enabled: %d requests per %ds per client",
+            config.rate_limit.requests,
+            config.rate_limit.window,
+        )
+    else:
+        logger.warning("Rate limiting is DISABLED — upstream sources are unprotected")
 
     # ---- Blueprint ----
     app.register_blueprint(hkp_bp)

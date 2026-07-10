@@ -13,6 +13,7 @@ import pgpy
 from ldap3 import BASE, SUBTREE, Connection, Server, Tls
 from ldap3.utils.conv import escape_filter_chars
 
+from hokeypokey.config import parse_duration
 from hokeypokey.models import FieldDefinition, SearchResult, SourceKey, SourceMetadata
 from hokeypokey.sources.base import KeySource
 
@@ -42,6 +43,9 @@ class LDAPSource(KeySource):
                         Set to ``false`` only for self-signed certs in dev/test.
     ``tls_ca_file``     Path to a CA bundle file for custom certificate authorities
                         (optional; uses the system CA bundle by default).
+    ``timeout``         Connect/receive timeout as a duration string or integer
+                        seconds (default: ``"10s"``).  Prevents a hung LDAP
+                        server from starving the shared thread pool.
     ``fields``          Mapping of logical field name → LDAP attribute name
     ==================  ============================================================
 
@@ -67,6 +71,12 @@ class LDAPSource(KeySource):
         self._base_filter: str = config.get("search_filter", f"({self._key_attribute}=*)")
         self._fingerprint_attribute: str | None = config.get("fingerprint_attribute")
 
+        # Connect/receive timeout in seconds (duration string or int).
+        raw_timeout = config.get("timeout", 10)
+        self._timeout: int = (
+            parse_duration(raw_timeout) if isinstance(raw_timeout, str) else int(raw_timeout)
+        )
+
         # Resolve bind password from environment
         self._bind_password: str | None = None
         pw_env = config.get("bind_password_env")
@@ -87,7 +97,7 @@ class LDAPSource(KeySource):
 
         # Shared, stateless Server object — safe to reuse across threads.
         # Connection objects are created per-call in _ldap_search().
-        self._server = Server(self._uri, tls=tls_config)
+        self._server = Server(self._uri, tls=tls_config, connect_timeout=self._timeout)
 
     # ------------------------------------------------------------------
     # KeySource interface
@@ -233,6 +243,7 @@ class LDAPSource(KeySource):
             password=self._bind_password,
             auto_bind=True,
             read_only=True,
+            receive_timeout=self._timeout,
         )
         try:
             conn.search(

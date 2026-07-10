@@ -60,6 +60,10 @@ class KeyCache:
         # Index: field_name → { value → set of fingerprints }
         self._by_field: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
 
+        # Approximate hit/miss counters (see stats()).
+        self._hits = 0
+        self._misses = 0
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -93,24 +97,41 @@ class KeyCache:
                 self._by_field[field_name][value.lower()].add(fp)
 
     def _deindex_key(self, fp: str, key: SourceKey) -> None:
-        """Remove *fp* from all secondary indexes."""
+        """Remove *fp* from all secondary indexes.
+
+        Index entries whose fingerprint set becomes empty are deleted outright
+        — otherwise LRU churn would leak empty sets indefinitely.
+        """
         # Key-ID indexes
         if len(fp) >= 16:
-            self._by_long_id[fp[-16:]].discard(fp)
+            self._discard_index_entry(self._by_long_id, fp[-16:], fp)
         if len(fp) >= 8:
-            self._by_short_id[fp[-8:]].discard(fp)
+            self._discard_index_entry(self._by_short_id, fp[-8:], fp)
 
         # Email index
         email = key.metadata.get("email", "").strip().lower()
         if email:
-            self._by_email[email].discard(fp)
+            self._discard_index_entry(self._by_email, email, fp)
 
         # Generic metadata field index
         for field_name, value in key.metadata.items():
             if field_name == "email":
                 continue
             if value and field_name in self._by_field:
-                self._by_field[field_name][value.lower()].discard(fp)
+                field_index = self._by_field[field_name]
+                self._discard_index_entry(field_index, value.lower(), fp)
+                if not field_index:
+                    del self._by_field[field_name]
+
+    @staticmethod
+    def _discard_index_entry(index: dict[str, set[str]], key: str, fp: str) -> None:
+        """Discard *fp* from ``index[key]``, deleting the set if it empties."""
+        fps = index.get(key)
+        if fps is None:
+            return
+        fps.discard(fp)
+        if not fps:
+            del index[key]
 
     def _evict_lru(self) -> None:
         """Evict the least-recently-used entry if the cache is over capacity."""
@@ -165,7 +186,10 @@ class KeyCache:
         fp = self._normalize_fp(fp)
         entry = self._store.get(fp)
         if entry is not None:
+            self._hits += 1
             self._store.move_to_end(fp)
+        else:
+            self._misses += 1
         return entry
 
     def get_by_key_id(self, key_id: str) -> list[CachedKey]:
@@ -188,6 +212,7 @@ class KeyCache:
             if fp in self._store:
                 self._store.move_to_end(fp)
                 results.append(self._store[fp])
+        self._count_lookup(bool(results))
         return results
 
     def search(self, query: str, field: str) -> list[CachedKey]:
@@ -213,7 +238,28 @@ class KeyCache:
             if fp in self._store:
                 self._store.move_to_end(fp)
                 results.append(self._store[fp])
+        self._count_lookup(bool(results))
         return results
+
+    def _count_lookup(self, hit: bool) -> None:
+        """Record a lookup outcome in the hit/miss counters."""
+        if hit:
+            self._hits += 1
+        else:
+            self._misses += 1
+
+    def stats(self) -> dict[str, int | None]:
+        """Return approximate cache statistics.
+
+        Hit/miss counts include the orchestrator's internal read-backs after a
+        fan-out, so treat them as indicative rather than exact.
+        """
+        return {
+            "size": len(self._store),
+            "max_size": self._max_size,
+            "hits": self._hits,
+            "misses": self._misses,
+        }
 
     def is_fresh(self, fp: str) -> bool:
         """Return ``True`` if the entry for *fp* exists and is within its TTL.
