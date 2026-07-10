@@ -4,9 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      # HKP standard port
-      - "11371:11371"
+    # No ports exposed directly — Caddy proxies all external traffic.
     volumes:
       # Mount your configuration file (read-only)
       - ./hokeypokey.toml:/etc/hokeypokey/hokeypokey.toml:ro
@@ -27,3 +25,26 @@ services:
     restart: unless-stopped
     # Optional: override host/port without editing the config file
     # command: ["--config", "/etc/hokeypokey/hokeypokey.toml", "--port", "11371"]
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"       # ACME HTTP-01 challenge
+      - "11371:11371" # HKP (plain)
+      - "11372:11372" # HKPS (TLS, Let's Encrypt)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - HKPS_DOMAIN
+    depends_on:
+      - hokeypokey
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

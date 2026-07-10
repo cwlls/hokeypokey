@@ -1,0 +1,11 @@
+# Set HKPS_DOMAIN in your .env file (e.g. HKPS_DOMAIN=keys.example.com).
+# Caddy automatically obtains and renews a Let's Encrypt certificate.
+# Port 80 must be publicly reachable for the ACME HTTP-01 challenge.
+
+{$HKPS_DOMAIN}:11372 {
+	reverse_proxy hokeypokey:11371
+}
+
+:11371 {
+	reverse_proxy hokeypokey:11371
+}
