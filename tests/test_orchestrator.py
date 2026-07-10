@@ -509,9 +509,7 @@ async def test_upstream_error_serves_stale_within_ceiling():
 
     source = make_mock_source()
     source.check_freshness = AsyncMock(side_effect=RuntimeError("upstream down"))
-    orch = SearchOrchestrator(
-        sources={"ldap": source}, cache=cache, resolvers=[], max_stale=3600
-    )
+    orch = SearchOrchestrator(sources={"ldap": source}, cache=cache, resolvers=[], max_stale=3600)
 
     results = await orch.lookup(parse_search("alice@example.com"))
 
@@ -532,7 +530,10 @@ async def test_upstream_error_beyond_ceiling_drops_entry():
     source = make_mock_source()
     source.check_freshness = AsyncMock(side_effect=RuntimeError("upstream down"))
     orch = SearchOrchestrator(
-        sources={"ldap": source}, cache=cache, resolvers=[], max_stale=50  # ceiling exceeded
+        sources={"ldap": source},
+        cache=cache,
+        resolvers=[],
+        max_stale=50,  # ceiling exceeded
     )
 
     results = await orch.lookup(parse_search("alice@example.com"))
@@ -553,9 +554,7 @@ async def test_refetch_error_beyond_ceiling_drops_entry():
 
     source = make_mock_source(freshness_result=False)
     source.refetch = AsyncMock(side_effect=RuntimeError("upstream down"))
-    orch = SearchOrchestrator(
-        sources={"ldap": source}, cache=cache, resolvers=[], max_stale=50
-    )
+    orch = SearchOrchestrator(sources={"ldap": source}, cache=cache, resolvers=[], max_stale=50)
 
     results = await orch.lookup(parse_search("alice@example.com"))
 
