@@ -14,8 +14,13 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock LICENSE README.md ./
 COPY src/ ./src/
 
-# Install into a virtual environment under /build/.venv (non-editable so the
-# venv is self-contained and can be copied without the source tree).
+# Install into a virtual environment at /app/.venv — its FINAL path in the
+# runtime image. Entry-point scripts embed the venv path in their shebang
+# (#!/app/.venv/bin/python3), so building at /build/.venv and copying to
+# /app/.venv would leave broken interpreter paths ("no such file or directory").
+# Non-editable so the venv is self-contained and can be copied without the
+# source tree.
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv
 RUN uv sync --no-dev --frozen --no-editable
 
 # ---- Final stage ----
@@ -30,8 +35,9 @@ RUN useradd --system --no-create-home --shell /sbin/nologin hokeypokey
 
 WORKDIR /app
 
-# Copy the virtual environment from the builder
-COPY --from=builder /build/.venv /app/.venv
+# Copy the virtual environment from the builder (same path as it was built at,
+# keeping script shebangs valid)
+COPY --from=builder /app/.venv /app/.venv
 
 # Make the venv's binaries available
 ENV PATH="/app/.venv/bin:$PATH"
